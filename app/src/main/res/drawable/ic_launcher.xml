@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Waterfall: three soft falling lines on the home-screen colour. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#09212B" android:pathData="M0,0h108v108h-108z" />
+    <path android:strokeColor="#E6E9EC" android:strokeWidth="6" android:strokeLineCap="round"
+        android:pathData="M38,30 C38,52 46,60 46,80 M54,26 C54,50 62,58 62,82 M70,30 C70,52 78,60 78,78" />
+</vector>
