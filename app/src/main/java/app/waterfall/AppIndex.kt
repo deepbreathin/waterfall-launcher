@@ -72,6 +72,9 @@ class AppIndex(private val ctx: Context) {
 
     private fun setFavourites(keys: List<String>) = prefs.edit().putString("favourites", JSONArray(keys).toString()).apply()
 
+    /** True once anything has ever been added to home: the first-run hint is never shown again. */
+    fun setUp() = prefs.contains("favourites")
+
     fun isFavourite(a: App) = a.key in favouriteKeys()
     fun toggleFavourite(a: App) {
         val k = favouriteKeys().toMutableList()

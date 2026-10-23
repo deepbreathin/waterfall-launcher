@@ -194,7 +194,7 @@ class HomeActivity : Activity() {
         allWrap.addView(allColumn)
 
         strip = LetterStrip(this).apply { alpha = 0f }
-        homePage.addView(strip, FrameLayout.LayoutParams(dp(200), -1, Gravity.END))
+        homePage.addView(strip, FrameLayout.LayoutParams(-1, -1, Gravity.END))   // full width: on home, the right half picks letters
         stripTouch()
 
         side = buildSide().apply { visibility = View.INVISIBLE }
@@ -228,7 +228,7 @@ class HomeActivity : Activity() {
         if (favs.map { it.key } != favouritesShown) {
             favourites.removeAllViews()
             for (a in favs) favourites.addView(row(label = false).also { bind(it, a) })
-            if (favs.isEmpty()) favourites.addView(label(15f, 500, DIM).apply {
+            if (favs.isEmpty() && !index.setUp()) favourites.addView(label(15f, 500, DIM).apply {
                 text = "Touch the right edge for your apps. Long-press one to add it here."; isSingleLine = false
             })
             favouritesShown = favs.map { it.key }
@@ -240,8 +240,13 @@ class HomeActivity : Activity() {
         PopupMenu(this, v).apply {
             menu.add(if (index.isFavourite(a)) "Remove from home" else "Add to home")
             menu.add("App info")
+            menu.add("Uninstall")
             setOnMenuItemClickListener {
-                if (it.title == "App info") index.appInfo(a) else { index.toggleFavourite(a); refreshHome() }
+                when (it.title) {
+                    "App info" -> index.appInfo(a)
+                    "Uninstall" -> open(Intent(Intent.ACTION_DELETE, android.net.Uri.parse("package:" + a.component.packageName)))
+                    else -> { index.toggleFavourite(a); refreshHome() }
+                }
                 true
             }
         }.show()
@@ -250,15 +255,29 @@ class HomeActivity : Activity() {
     // ---------------------------------------------------------------- the letter strip
 
     private var highlighted: View? = null
+    // where the finger went down: letters are picked right of it, moving left of it goes onto the list
+    private var stripX0 = 0f; private var stripY0 = 0f; private var stripT0 = 0L; private var stripWide = false
+
+    /** On the bare home screen the whole right half picks letters; widgets there still take their own touches. */
+    private fun wideCatch(e: MotionEvent): Boolean {
+        if (section.visibility == View.VISIBLE || allList.visibility == View.VISIBLE || sideShown) return false
+        if (e.x < strip.width / 2f) return false
+        val loc = IntArray(2); widgets.getLocationOnScreen(loc)
+        return widgets.childCount == 0 || e.rawY < loc[1] || e.rawY > loc[1] + widgets.height
+    }
 
     @SuppressLint("ClickableViewAccessibility")
     private fun stripTouch() {
         strip.setOnTouchListener { _, e ->
-            if (e.actionMasked == MotionEvent.ACTION_DOWN && e.x < strip.width - dp(if (allList.visibility == View.VISIBLE) 76 else 72))   // a generous edge: no need to aim
-                return@setOnTouchListener false
+            if (e.actionMasked == MotionEvent.ACTION_DOWN) {
+                val edge = e.x >= strip.width - dp(if (allList.visibility == View.VISIBLE) 76 else 72)   // a generous edge: no need to aim
+                stripWide = !edge && wideCatch(e)
+                if (!edge && !stripWide) return@setOnTouchListener false
+                stripX0 = e.x; stripY0 = e.y; stripT0 = SystemClock.uptimeMillis()
+            }
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
-                    val onStrip = e.x > strip.width - dp(90)
+                    val onStrip = e.x > Math.min(strip.width - dp(90).toFloat(), stripX0 - dp(40))
                     if (onStrip || highlighted == null && section.visibility != View.VISIBLE) {
                         val l = strip.letterAt(e.y) ?: return@setOnTouchListener true
                         strip.alpha = 1f; strip.fingerDown = true; strip.follow(e.y)
@@ -271,7 +290,11 @@ class HomeActivity : Activity() {
                     val app = highlighted?.tag as? AppIndex.App
                     val letter = strip.bubble
                     highlight(null)
+                    val dx = e.x - stripX0; val dy = e.y - stripY0
                     when {
+                        // a quick sideways flick from the wide area is still the swipe to the side page
+                        stripWide && dx < -dp(80) && Math.abs(dx) > Math.abs(dy) * 1.5f && SystemClock.uptimeMillis() - stripT0 < 300 ->
+                            { strip.release(); closeAll(); showSide(true) }
                         app != null -> { strip.release(); closeAll(); index.launch(app) }
                         letter == "○" -> { strip.release(); openAll(null) }
                         // Let go on a letter: the full list takes over, lined up so that letter's apps stay

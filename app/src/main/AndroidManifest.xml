@@ -12,6 +12,7 @@
 
     <!-- Swipe down for notifications; app usage (optional, "Usage access") orders each letter. -->
     <uses-permission android:name="android.permission.EXPAND_STATUS_BAR" />
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
 
