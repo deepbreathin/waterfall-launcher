@@ -31,9 +31,9 @@ class LetterStrip(ctx: Context) : View(ctx) {
 
     init { setLayerType(LAYER_TYPE_HARDWARE, null) }
 
-    /** The band the letters span: most of the screen height, for more room to aim. */
-    fun top() = height * 0.10f
-    fun bottom() = height * 0.86f
+    /** The band the letters span: sits low so the top letters are in easy thumb reach. */
+    fun top() = height * 0.25f
+    fun bottom() = height * 0.95f
     fun step() = if (letters.size < 2) 0f else (bottom() - top()) / (letters.size - 1)
     val touching get() = amount > 0f && bubble != null
 
