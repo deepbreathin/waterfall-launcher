@@ -6,4 +6,4 @@ if [ -z "$GRADLE_HOME" ] && [ -x "$(command -v gradle)" ]; then
 fi
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-exec java -jar "$DIR/gradle/wrapper/gradle-wrapper.jar" "$@"
+exec java -classpath "$DIR/gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"
