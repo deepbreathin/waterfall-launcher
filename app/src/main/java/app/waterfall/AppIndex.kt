@@ -4,6 +4,7 @@ import android.app.AppOpsManager
 import android.app.usage.UsageStatsManager
 import android.content.ComponentName
 import android.content.Context
+import android.content.pm.LauncherActivityInfo
 import android.content.pm.LauncherApps
 import android.graphics.drawable.Drawable
 import android.os.Process
@@ -28,11 +29,15 @@ class AppIndex(private val ctx: Context) {
     private val la = ctx.getSystemService(LauncherApps::class.java)
     private val prefs = ctx.getSharedPreferences("launcher", Context.MODE_PRIVATE)
     private val icons = ConcurrentHashMap<String, Drawable>()
+    private val launchInfo = ConcurrentHashMap<String, LauncherActivityInfo>()
     @Volatile var apps: List<App> = emptyList(); private set
     private var usage: Map<String, Long> = emptyMap()   // package → recent foreground ms
 
     fun load() {
-        apps = la.getActivityList(null, Process.myUserHandle())
+        val activities = la.getActivityList(null, Process.myUserHandle())
+        launchInfo.clear()
+        activities.forEach { launchInfo[it.componentName.flattenToString()] = it }
+        apps = activities
             .filter { it.componentName.packageName != ctx.packageName }
             .map { App(it.label.toString().trim(), it.componentName) }
             .sortedBy { it.label.lowercase() }
@@ -40,8 +45,7 @@ class AppIndex(private val ctx: Context) {
     }
 
     fun icon(a: App): Drawable? = icons[a.key] ?: try {
-        la.getActivityList(a.component.packageName, Process.myUserHandle())
-            .firstOrNull { it.componentName == a.component }?.getBadgedIcon(0)?.also { icons[a.key] = it }
+        launchInfo[a.key]?.getBadgedIcon(0)?.also { icons[a.key] = it }
     } catch (e: Exception) { null }
 
     /** Warm the icon cache off the main thread. */

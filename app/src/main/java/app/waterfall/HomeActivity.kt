@@ -123,9 +123,16 @@ class HomeActivity : Activity() {
     override fun onBackPressed() { if (sideShown) showSide(false) else closeAll() }
 
     private fun reload() = thread {
-        index.load(); index.preloadIcons()
+        index.load()
         loadedAt = SystemClock.elapsedRealtime()
-        runOnUiThread { strip.letters = listOf("☆") + index.letters() + "○"; allBuiltFor = null; favouritesShown = null; refreshHome() }
+        runOnUiThread {
+            strip.letters = listOf("☆") + index.letters() + "○"
+            allBuiltFor = null
+            favouritesShown = null
+            refreshHome()
+            // Show the home screen before warming icons for the entire app catalog.
+            thread(name = "waterfall-icon-cache") { index.preloadIcons() }
+        }
     }
 
     // ---------------------------------------------------------------- layout
@@ -428,7 +435,11 @@ class HomeActivity : Activity() {
         homeContent.animate().cancel(); homeContent.alpha = 1f; homeContent.visibility = View.VISIBLE
         strip.alpha = 0f
         if (search.text.isNotEmpty()) search.setText("")
-        (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(search.windowToken, 0)
+        if (search.hasFocus()) {
+            (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager)
+                .hideSoftInputFromWindow(search.windowToken, 0)
+            search.clearFocus()
+        }
     }
 
     // ---------------------------------------------------------------- swipes: side page, notifications
