@@ -1,0 +1,72 @@
+name: Waterfall Android APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "gradle/**"
+      - "*.gradle.kts"
+      - "gradle.properties"
+      - "gradlew"
+      - ".github/workflows/android-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Build signed release APK
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: |
+          code=$(sed -n 's/.*versionCode = \([0-9][0-9]*\).*/\1/p' app/build.gradle.kts)
+          name=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts)
+          test -n "$code" && test -n "$name"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Publish APK for Build Drop and Obtainium
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_CODE: ${{ steps.version.outputs.code }}
+          VERSION_NAME: ${{ steps.version.outputs.name }}
+        shell: bash
+        run: |
+          sha=$(git rev-parse --short HEAD)
+          branch="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          tag="build-drop-build-$VERSION_CODE"
+          asset="Waterfall-$VERSION_NAME.apk"
+          cp app/build/outputs/apk/release/app-release.apk "$asset"
+
+          meta=$(jq -cn --arg pkg "app.waterfall" --argjson vc "$VERSION_CODE" --arg vn "$VERSION_NAME" \
+            --arg commit "$sha" --arg branch "$branch" --arg source "github-actions" --arg apk "$asset" \
+            '{packageName:$pkg, versionCode:$vc, versionName:$vn, commit:$commit, branch:$branch, source:$source, apk:$apk}')
+          notes=$(printf 'Waterfall %s signed release build from `%s` (%s).\n\n<!-- build-drop %s -->' \
+            "$VERSION_NAME" "$branch" "$sha" "$meta")
+          title="Waterfall $VERSION_NAME ($sha)"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$asset" --clobber
+            gh release edit "$tag" --title "$title" --notes "$notes"
+          else
+            gh release create "$tag" "$asset" --prerelease --target "$GITHUB_SHA" --title "$title" --notes "$notes"
+          fi
