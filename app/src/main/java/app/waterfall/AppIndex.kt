@@ -2,15 +2,12 @@ package app.waterfall
 
 import android.app.AppOpsManager
 import android.app.usage.UsageStatsManager
-import android.content.ComponentName
 import android.content.Context
 import android.content.pm.LauncherActivityInfo
 import android.content.pm.LauncherApps
 import android.graphics.drawable.Drawable
 import android.os.Process
 import org.json.JSONArray
-import org.json.JSONObject
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Every launchable app, grouped by first letter and, within a letter, most-used first, so the ones
@@ -20,36 +17,30 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class AppIndex(private val ctx: Context) {
 
-    data class App(val label: String, val component: ComponentName) {
+    class App(val label: String, private val activity: LauncherActivityInfo) {
+        val component = activity.componentName
         val key: String get() = component.flattenToString()
         val letter: String get() = label.firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()
             ?.let { if (it in 'A'..'Z') it.toString() else "#" } ?: "#"
+
+        @Volatile private var icon: Drawable? = null
+
+        fun cachedIcon(): Drawable? = icon?.let { it.constantState?.newDrawable() ?: it }
+
+        fun loadIcon() {
+            if (icon == null) icon = try { activity.getBadgedIcon(0) } catch (_: Exception) { null }
+        }
     }
 
     private val la = ctx.getSystemService(LauncherApps::class.java)
     private val prefs = ctx.getSharedPreferences("launcher", Context.MODE_PRIVATE)
-    private val icons = ConcurrentHashMap<String, Drawable>()
-    private val launchInfo = ConcurrentHashMap<String, LauncherActivityInfo>()
-    @Volatile var apps: List<App> = emptyList(); private set
-    private var usage: Map<String, Long> = emptyMap()   // package → recent foreground ms
+    var apps: List<App> = emptyList()
+    var usage: Map<String, Long> = emptyMap()   // package → recent foreground ms
 
-    fun load() {
-        val activities = la.getActivityList(null, Process.myUserHandle())
-        launchInfo.clear()
-        activities.forEach { launchInfo[it.componentName.flattenToString()] = it }
-        apps = activities
-            .filter { it.componentName.packageName != ctx.packageName }
-            .map { App(it.label.toString().trim(), it.componentName) }
+    fun loadApps(): List<App> =
+        la.getActivityList(null, Process.myUserHandle())
+            .map { App(it.label.toString().trim(), it) }
             .sortedBy { it.label.lowercase() }
-        usage = readUsage()
-    }
-
-    fun icon(a: App): Drawable? = icons[a.key] ?: try {
-        launchInfo[a.key]?.getBadgedIcon(0)?.also { icons[a.key] = it }
-    } catch (e: Exception) { null }
-
-    /** Warm the icon cache off the main thread. */
-    fun preloadIcons() = apps.forEach { icon(it) }
 
     fun letters(): List<String> = apps.map { it.letter }.distinct().sortedWith(compareBy({ it == "#" }, { it }))
 
@@ -98,7 +89,7 @@ class AppIndex(private val ctx: Context) {
         return ops.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), ctx.packageName) == AppOpsManager.MODE_ALLOWED
     }
 
-    private fun readUsage(): Map<String, Long> {
+    fun readUsage(): Map<String, Long> {
         if (!usageAllowed()) return emptyMap()
         return try {
             val usm = ctx.getSystemService(UsageStatsManager::class.java)
@@ -118,5 +109,4 @@ class AppIndex(private val ctx: Context) {
 
     fun setWidgetIds(ids: List<Int>) = prefs.edit().putString("widgets", JSONArray(ids).toString()).apply()
 
-    @Suppress("unused") private fun unused() = JSONObject()
 }

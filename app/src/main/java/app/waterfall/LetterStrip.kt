@@ -18,6 +18,7 @@ class LetterStrip(ctx: Context) : View(ctx) {
     /** The big letter only shows while the finger is down; after letting go it would cover app names. */
     var fingerDown = false; set(v) { field = v; invalidate() }
     var color = 0xFFE6E9EC.toInt()
+    var textScale = 1f; set(value) { field = value; invalidate() }
 
     private val d = resources.displayMetrics.density
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER; typeface = Fonts.bold(ctx) }
@@ -63,14 +64,13 @@ class LetterStrip(ctx: Context) : View(ctx) {
     override fun onDraw(c: Canvas) {
         if (letters.isEmpty()) return
         val baseX = width - 22 * d
-        paint.textSize = 15 * d
         val current = if (bubble != null) letterAt(fingerY) else null
         for ((i, l) in letters.withIndex()) {
             val y = top() + i * step()
             val near = Math.max(0f, 1f - Math.abs(y - fingerY) / (190 * d))
             val x = baseX - amount * near * near * 78 * d
             paint.color = if (l == current) 0xFFFFFFFF.toInt() else color
-            paint.textSize = (15 + 5 * amount * near * near) * d
+            paint.textSize = (15 + 5 * amount * near * near) * d * textScale
             c.drawText(l, x, y + paint.textSize / 3, paint)
         }
         val b = bubble
@@ -78,7 +78,7 @@ class LetterStrip(ctx: Context) : View(ctx) {
             val bx = baseX - 140 * d
             bubbleBg.alpha = (0x33 * amount).toInt()
             c.drawCircle(bx, fingerY, 28 * d, bubbleBg)
-            bubblePaint.textSize = 34 * d; bubblePaint.color = 0xFFFFFF or ((0xCC * amount).toInt() shl 24)
+            bubblePaint.textSize = 34 * d * textScale; bubblePaint.color = 0xFFFFFF or ((0xCC * amount).toInt() shl 24)
             c.drawText(b, bx, fingerY + bubblePaint.textSize / 3, bubblePaint)
         }
     }

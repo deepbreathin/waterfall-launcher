@@ -23,6 +23,18 @@
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
 
         <activity
+            android:name=".SettingsActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity="app.waterfall.settings"
+            android:theme="@android:style/Theme.Material.NoActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
             android:name=".HomeActivity"
             android:exported="true"
             android:launchMode="singleTask"

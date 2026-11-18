@@ -8,11 +8,15 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.os.Bundle
 import android.os.SystemClock
 import android.text.Editable
 import android.text.TextWatcher
+import android.view.Choreographer
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
@@ -28,7 +32,8 @@ import android.widget.PopupMenu
 import android.widget.ScrollView
 import android.widget.TextClock
 import android.widget.TextView
-import kotlin.concurrent.thread
+import java.util.WeakHashMap
+import java.util.concurrent.Executors
 
 /**
  * Waterfall: a minimal home screen.
@@ -39,15 +44,15 @@ import kotlin.concurrent.thread
  * - Swipe left: a side page that holds one widget of your choice. Swipe down: notifications.
  * - Long-press an app to add or remove it from home; long-press empty space for widgets and settings.
  * Other apps can react to the home screen showing or hiding: it broadcasts [HOME_VISIBLE] with
- * extra "visible" (true/false). Rows are built once and reused; nothing reloads on returning home.
+ * extra "visible" (true/false). App rows are reused across home returns.
  */
 class HomeActivity : Activity() {
 
     companion object {
         /** Broadcast when home shows or hides (extra "visible"), for add-ons such as floating buttons. */
         const val HOME_VISIBLE = "app.waterfall.HOME_VISIBLE"
-        private const val BG = 0xFF09212B.toInt()            // deep teal, calm
-        private const val FG = 0xFFE6E9EC.toInt()
+        private const val BG = Appearance.BACKGROUND
+        private const val FG = Appearance.FOREGROUND
         private const val DIM = 0xFF8A949E.toInt()
         private const val HOST_ID = 2048
         private const val PICK = 1; private const val CONFIGURE = 2; private const val PICK_SIDE = 3; private const val CONFIGURE_SIDE = 4
@@ -76,12 +81,36 @@ class HomeActivity : Activity() {
     private lateinit var side: View
     private var sideShown = false
     private var pendingWidget = -1
-    private var loadedAt = 0L
+    private val catalogWorker = Executors.newSingleThreadExecutor()
+    private val iconWorker = Executors.newSingleThreadExecutor()
+    private var usageRequestedAt: Long? = null
+    private var widgetsStarted = false
+    private var widgetsBuilt = false
+    private var widgetsListening = false
     private var allBuiltFor: List<AppIndex.App>? = null
     private val allRows = HashMap<String, View>()
     private val allHeaders = HashMap<String, View>()
     private var favouritesShown: List<String>? = null
-    private var widgetsShown: List<Int>? = null
+    private val appearancePrefs by lazy { Appearance.preferences(this) }
+    private val textSizes = WeakHashMap<TextView, Float>()
+    private var textScale = 1f
+    private val monochrome = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(0f) })
+    private val appearanceChanged = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        when (key) {
+            Appearance.TEXT_SIZE -> {
+                textScale = readTextScale()
+                strip.textScale = textScale
+                textSizes.forEach { (view, size) -> view.textSize = size * textScale }
+            }
+            Appearance.MONOCHROME_HOME_ICONS -> {
+                val filter = homeIconFilter()
+                for (i in 0 until favourites.childCount) {
+                    val row = favourites.getChildAt(i) as? LinearLayout ?: continue
+                    (row.getChildAt(0) as ImageView).colorFilter = filter
+                }
+            }
+        }
+    }
 
     private val packages = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) { reload() }
@@ -94,51 +123,110 @@ class HomeActivity : Activity() {
         window.setFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
         index = AppIndex(this)
         host = AppWidgetHost(this, HOST_ID)
+        textScale = readTextScale()
         build()
+        appearancePrefs.registerOnSharedPreferenceChangeListener(appearanceChanged)
         registerReceiver(packages, IntentFilter().apply {
             addAction(Intent.ACTION_PACKAGE_ADDED); addAction(Intent.ACTION_PACKAGE_REMOVED)
             addAction(Intent.ACTION_PACKAGE_CHANGED); addDataScheme("package")
         })
+        refreshHome()
         reload()
     }
 
-    override fun onDestroy() { try { unregisterReceiver(packages) } catch (_: Exception) {}; super.onDestroy() }
-    override fun onStart() { super.onStart(); host.startListening() }
-    override fun onStop() { super.onStop(); try { host.stopListening() } catch (_: Exception) {} }
+    override fun onDestroy() {
+        unregisterReceiver(packages)
+        appearancePrefs.unregisterOnSharedPreferenceChangeListener(appearanceChanged)
+        catalogWorker.shutdownNow()
+        iconWorker.shutdownNow()
+        super.onDestroy()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        widgetsStarted = true
+        // Starting the host can apply RemoteViews synchronously. Let home draw first.
+        Choreographer.getInstance().postFrameCallback { root.post {
+            if (widgetsStarted) startWidgets()
+        } }
+    }
+
+    override fun onStop() {
+        widgetsStarted = false
+        if (widgetsListening) {
+            widgetsListening = false
+            try { host.stopListening() } catch (_: Exception) {}
+        }
+        super.onStop()
+    }
 
     override fun onResume() {
         super.onResume()
         sendBroadcast(Intent(HOME_VISIBLE).putExtra("visible", true))
-        closeAll()
-        if (loadedAt > 0 && SystemClock.elapsedRealtime() - loadedAt > USAGE_REFRESH_MS) reload()   // usage order, now and then
-        else refreshHome()
+        if (section.visibility == View.VISIBLE || allList.visibility != View.GONE) closeAll()
+        refreshUsage()
     }
 
     override fun onPause() { super.onPause(); sendBroadcast(Intent(HOME_VISIBLE).putExtra("visible", false)) }
 
     /** Home pressed again while already home: back to the plain home page. */
-    override fun onNewIntent(intent: Intent?) { super.onNewIntent(intent); closeAll(); showSide(false) }
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        closeAll()
+        if (side.visibility == View.VISIBLE) {
+            side.animate().cancel()
+            side.visibility = View.INVISIBLE
+            homePage.animate().cancel()
+            homePage.translationX = 0f
+            homePage.alpha = 1f
+            sideShown = false
+        }
+    }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() { if (sideShown) showSide(false) else closeAll() }
 
-    private fun reload() = thread {
-        index.load()
-        loadedAt = SystemClock.elapsedRealtime()
+    private fun reload() = catalogWorker.execute {
+        val apps = index.loadApps()
         runOnUiThread {
+            if (isDestroyed) return@runOnUiThread
+            index.apps = apps
             strip.letters = listOf("☆") + index.letters() + "○"
-            allBuiltFor = null
             favouritesShown = null
             refreshHome()
-            // Show the home screen before warming icons for the entire app catalog.
-            thread(name = "waterfall-icon-cache") { index.preloadIcons() }
+        }
+    }
+
+    private fun refreshUsage() {
+        val now = SystemClock.elapsedRealtime()
+        val lastRequest = usageRequestedAt
+        if (lastRequest != null && now - lastRequest < USAGE_REFRESH_MS) return
+        usageRequestedAt = now
+        catalogWorker.execute {
+            val usage = index.readUsage()
+            runOnUiThread {
+                if (isDestroyed || index.usage == usage) return@runOnUiThread
+                index.usage = usage
+                allBuiltFor = null
+            }
         }
     }
 
     // ---------------------------------------------------------------- layout
 
+    private fun readTextScale() = appearancePrefs.getInt(Appearance.TEXT_SIZE, Appearance.DEFAULT_TEXT_SIZE) / 100f
+
+    private fun homeIconFilter() = monochrome.takeIf {
+        appearancePrefs.getBoolean(Appearance.MONOCHROME_HOME_ICONS, false)
+    }
+
+    private fun TextView.launcherTextSize(size: Float) {
+        textSizes[this] = size
+        textSize = size * textScale
+    }
+
     private fun label(size: Float, weight: Int, color: Int = FG) = TextView(this).apply {
-        textSize = size; setTextColor(color); typeface = Fonts.get(this@HomeActivity, weight); isSingleLine = true
+        launcherTextSize(size); setTextColor(color); typeface = Fonts.get(this@HomeActivity, weight); isSingleLine = true
     }
 
     private fun build() {
@@ -155,12 +243,12 @@ class HomeActivity : Activity() {
             }
         }
         val clock = TextClock(this).apply {
-            format12Hour = "H:mm"; format24Hour = "H:mm"; textSize = 60f; setTextColor(FG)
+            format12Hour = "H:mm"; format24Hour = "H:mm"; launcherTextSize(60f); setTextColor(FG)
             typeface = Fonts.light(this@HomeActivity)
             setOnClickListener { open(Intent(android.provider.AlarmClock.ACTION_SHOW_ALARMS)) }
         }
         val date = TextClock(this).apply {
-            format12Hour = "EEE d MMM"; format24Hour = "EEE d MMM"; textSize = 20f; setTextColor(FG)
+            format12Hour = "EEE d MMM"; format24Hour = "EEE d MMM"; launcherTextSize(20f); setTextColor(FG)
             typeface = Fonts.regular(this@HomeActivity)
             setPadding(dp(6), 0, 0, dp(12))
         }
@@ -174,10 +262,6 @@ class HomeActivity : Activity() {
             visibility = View.GONE
             isClickable = true
             setOnClickListener { strip.release(); closeAll() }   // tap empty space: back to home
-            addOnLayoutChangeListener { v, _, top, _, bottom, _, _, _, _ ->
-                val want = ((bottom - top) * 0.20f).toInt()
-                if (v.paddingTop != want) v.post { v.setPadding(dp(40), want, dp(16), 0) }   // the strip overlays, no gap kept
-            }
         }
         sectionHeader = label(28f, 750).apply { setPadding(0, 0, 0, dp(10)) }
         section.addView(sectionHeader)
@@ -189,7 +273,7 @@ class HomeActivity : Activity() {
         allList = ScrollView(this).apply { addView(allWrap); visibility = View.GONE; isVerticalScrollBarEnabled = false }
         homePage.addView(allList, FrameLayout.LayoutParams(-1, -1))
         search = EditText(this).apply {
-            hint = "Search"; setHintTextColor(DIM); setTextColor(FG); textSize = 18f; typeface = Fonts.regular(this@HomeActivity)
+            hint = "Search"; setHintTextColor(DIM); setTextColor(FG); launcherTextSize(18f); typeface = Fonts.regular(this@HomeActivity)
             setBackgroundColor(0x22FFFFFF); setPadding(dp(16), dp(10), dp(16), dp(10)); isSingleLine = true
             addTextChangedListener(object : TextWatcher {
                 override fun afterTextChanged(s: Editable?) { filterAll(s?.toString() ?: "") }
@@ -200,7 +284,7 @@ class HomeActivity : Activity() {
         allWrap.addView(search, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
         allWrap.addView(allColumn)
 
-        strip = LetterStrip(this).apply { alpha = 0f }
+        strip = LetterStrip(this).apply { alpha = 0f; textScale = this@HomeActivity.textScale }
         homePage.addView(strip, FrameLayout.LayoutParams(-1, -1, Gravity.END))   // full width: on home, the right half picks letters
         stripTouch()
 
@@ -218,29 +302,45 @@ class HomeActivity : Activity() {
         addView(ImageView(context), LinearLayout.LayoutParams(dp(42), dp(42)))
         if (label) addView(label(19f, 500).apply { setPadding(dp(20), 0, 0, 0); isSingleLine = false; maxLines = 2 },
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        setOnClickListener { (tag as? AppIndex.App)?.let { index.launch(it) } }
+        setOnClickListener {
+            (tag as? AppIndex.App)?.let {
+                if (section.visibility == View.VISIBLE || allList.visibility != View.GONE) closeAll()
+                index.launch(it)
+            }
+        }
         setOnLongClickListener { (tag as? AppIndex.App)?.let { a -> appMenu(this, a) }; true }
     }
 
     private fun bind(v: View, a: AppIndex.App) {
+        if (v.tag === a) return
         val r = v as LinearLayout
-        val icon = index.icon(a)
-        (r.getChildAt(0) as ImageView).setImageDrawable(icon?.constantState?.newDrawable() ?: icon)
-        (r.getChildAt(1) as? TextView)?.text = a.label
         r.tag = a
+        (r.getChildAt(1) as? TextView)?.text = a.label
+        val image = r.getChildAt(0) as ImageView
+        val icon = a.cachedIcon()
+        image.setImageDrawable(icon)
+        if (icon == null) iconWorker.execute {
+            a.loadIcon()
+            runOnUiThread {
+                if (!isDestroyed && r.tag === a) image.setImageDrawable(a.cachedIcon())
+            }
+        }
     }
 
     private fun refreshHome() {
         val favs = index.favourites()
         if (favs.map { it.key } != favouritesShown) {
             favourites.removeAllViews()
-            for (a in favs) favourites.addView(row(label = false).also { bind(it, a) })
+            val filter = homeIconFilter()
+            for (a in favs) favourites.addView(row(label = false).apply {
+                (getChildAt(0) as ImageView).colorFilter = filter
+                bind(this, a)
+            })
             if (favs.isEmpty() && !index.setUp()) favourites.addView(label(15f, 500, DIM).apply {
                 text = "Touch the right edge for your apps. Long-press one to add it here."; isSingleLine = false
             })
             favouritesShown = favs.map { it.key }
         }
-        if (index.widgetIds() != widgetsShown) fillWidgets()
     }
 
     private fun appMenu(v: View, a: AppIndex.App) {
@@ -335,24 +435,18 @@ class HomeActivity : Activity() {
     }
 
     private fun showSection(letter: String) {
+        val top = (strip.height * 0.20f).toInt()
+        if (section.paddingTop != top) section.setPadding(dp(40), top, dp(16), 0)
         val apps = when (letter) { "☆" -> index.favourites(); "○" -> emptyList(); else -> index.section(letter) }
         sectionHeader.text = when (letter) { "☆" -> "Home"; "○" -> "All apps"; else -> letter }
         for ((i, r) in sectionRows.withIndex()) {
             val a = apps.getOrNull(i)
-            if (a == null) r.visibility = View.GONE else {
-                bind(r, a); r.visibility = View.VISIBLE
-                // a short glide per row (staggered a little) rather than a hard cut between letters
-                r.animate().cancel(); r.alpha = 0.35f; r.translationY = dp(8).toFloat()
-                r.animate().alpha(1f).translationY(0f).setStartDelay(i * 12L).setDuration(170)
-                    .setInterpolator(android.view.animation.DecelerateInterpolator()).start()
-            }
+            if (a != null) bind(r, a)
+            r.visibility = if (a == null) View.GONE else View.VISIBLE
         }
-        if (section.visibility != View.VISIBLE) {
-            allList.visibility = View.GONE
-            homeContent.animate().alpha(0f).setDuration(90).withEndAction { if (section.visibility == View.VISIBLE) homeContent.visibility = View.INVISIBLE }.start()
-            section.alpha = 0f; section.visibility = View.VISIBLE
-            section.animate().alpha(1f).setDuration(110).start()
-        }
+        allList.visibility = View.GONE
+        homeContent.visibility = View.INVISIBLE
+        section.visibility = View.VISIBLE
     }
 
     private fun openAll(letter: String?) {
@@ -376,6 +470,7 @@ class HomeActivity : Activity() {
         val header = allHeaders[letter] ?: return openAll(letter)
         allList.visibility = View.INVISIBLE
         allList.post {
+            if (allList.visibility != View.INVISIBLE) return@post
             // line up the letters themselves (the list header has extra space above its text)
             val want = IntArray(2).also { sectionHeader.getLocationOnScreen(it) }[1] + sectionHeader.paddingTop
             val listTop = IntArray(2).also { allList.getLocationOnScreen(it) }[1]
@@ -385,7 +480,12 @@ class HomeActivity : Activity() {
             else {
                 // early letters: the list can't scroll above its top, so add that much room above it
                 allWrap.setPadding(dp(40), dp(56) - scroll, dp(24), tail())
-                allList.post { allList.scrollTo(0, 0); showList() }
+                allList.post {
+                    if (allList.visibility == View.INVISIBLE) {
+                        allList.scrollTo(0, 0)
+                        showList()
+                    }
+                }
             }
         }
     }
@@ -416,14 +516,14 @@ class HomeActivity : Activity() {
 
     private fun filterAll(q: String) {
         val query = q.trim().lowercase()
-        for (l in index.letters()) {
+        for ((letter, apps) in index.apps.groupBy { it.letter }) {
             var any = false
-            for (a in index.apps.filter { it.letter == l }) {
+            for (a in apps) {
                 val show = query.isEmpty() || a.label.lowercase().contains(query)
                 allRows[a.key]?.visibility = if (show) View.VISIBLE else View.GONE
                 any = any || show
             }
-            allHeaders[l]?.visibility = if (any) View.VISIBLE else View.GONE
+            allHeaders[letter]?.visibility = if (any) View.VISIBLE else View.GONE
         }
     }
 
@@ -432,9 +532,8 @@ class HomeActivity : Activity() {
         if (allWrap.paddingTop != dp(56)) allWrap.setPadding(dp(40), dp(56), dp(24), tail())
         if (strip.bubble != null) strip.release()
         section.visibility = View.GONE; allList.visibility = View.GONE
-        homeContent.animate().cancel(); homeContent.alpha = 1f; homeContent.visibility = View.VISIBLE
+        homeContent.visibility = View.VISIBLE
         strip.alpha = 0f
-        if (search.text.isNotEmpty()) search.setText("")
         if (search.hasFocus()) {
             (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager)
                 .hideSoftInputFromWindow(search.windowToken, 0)
@@ -497,12 +596,14 @@ class HomeActivity : Activity() {
             if (index.widgetIds().isNotEmpty()) menu.add("Remove widgets")
             if (!index.usageAllowed()) menu.add("Order letters by most used")
             menu.add("Default home app")
+            menu.add("Waterfall settings")
             setOnMenuItemClickListener {
                 when (it.title) {
                     "Add a widget" -> pickWidget()
                     "Remove widgets" -> { index.widgetIds().forEach { id -> host.deleteAppWidgetId(id) }; index.setWidgetIds(emptyList()); fillWidgets() }
                     "Order letters by most used" -> open(Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS))
                     "Default home app" -> open(Intent(android.provider.Settings.ACTION_HOME_SETTINGS))
+                    "Waterfall settings" -> open(Intent(this@HomeActivity, SettingsActivity::class.java))
                 }
                 true
             }
@@ -527,8 +628,19 @@ class HomeActivity : Activity() {
             isClickable = true
             setOnLongClickListener { pickWidget(side = true); true }
         }
-        fillSide()
         return sideHolder
+    }
+
+    private fun startWidgets() {
+        if (!widgetsBuilt) {
+            widgetsBuilt = true
+            fillWidgets()
+            fillSide()
+        }
+        if (!widgetsListening && (index.widgetIds().isNotEmpty() || index.sideWidget() > 0)) {
+            host.startListening()
+            widgetsListening = true
+        }
     }
 
     private fun fillSide() {
@@ -563,6 +675,7 @@ class HomeActivity : Activity() {
             index.setWidgetIds(index.widgetIds() + id)
             fillWidgets()
         }
+        if (widgetsStarted && widgetsBuilt) startWidgets()
     }
 
     private fun fillWidgets() {
@@ -573,6 +686,5 @@ class HomeActivity : Activity() {
             val v = host.createView(this, id, info)
             widgets.addView(v, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, info.minHeight.coerceAtLeast(dp(90))).apply { bottomMargin = dp(8) })
         }
-        widgetsShown = index.widgetIds()
     }
 }
