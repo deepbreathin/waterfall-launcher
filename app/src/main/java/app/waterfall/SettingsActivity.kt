@@ -44,16 +44,16 @@ class SettingsActivity : Activity() {
         content.addView(sizes)
 
         content.addView(Switch(this).apply {
-            text = "Monochrome home icons"
+            text = "Monochrome app icons"
             textSize = 18f
             minHeight = dp(56)
-            isChecked = prefs.getBoolean(Appearance.MONOCHROME_HOME_ICONS, false)
+            isChecked = prefs.getBoolean(Appearance.MONOCHROME_APP_ICONS, false)
             setOnCheckedChangeListener { _, checked ->
-                prefs.edit().putBoolean(Appearance.MONOCHROME_HOME_ICONS, checked).apply()
+                prefs.edit().putBoolean(Appearance.MONOCHROME_APP_ICONS, checked).apply()
             }
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(16) })
         content.addView(TextView(this).apply {
-            text = "Show pinned favourites in grayscale."
+            text = "Use grayscale icons on home, in the alphabet picker, and in the app list."
             textSize = 14f
         })
 

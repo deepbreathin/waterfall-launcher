@@ -2,12 +2,14 @@ package app.waterfall
 
 import android.app.AppOpsManager
 import android.app.usage.UsageStatsManager
+import android.content.ComponentName
 import android.content.Context
-import android.content.pm.LauncherActivityInfo
+import android.content.Intent
 import android.content.pm.LauncherApps
 import android.graphics.drawable.Drawable
 import android.os.Process
 import org.json.JSONArray
+import org.json.JSONException
 
 /**
  * Every launchable app, grouped by first letter and, within a letter, most-used first, so the ones
@@ -17,10 +19,9 @@ import org.json.JSONArray
  */
 class AppIndex(private val ctx: Context) {
 
-    class App(val label: String, private val activity: LauncherActivityInfo) {
-        val component = activity.componentName
-        val key: String get() = component.flattenToString()
-        val letter: String get() = label.firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()
+    class App(val label: String, val component: ComponentName, private val fetchIcon: () -> Drawable?) {
+        val key = component.flattenToString()
+        val letter = label.firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()
             ?.let { if (it in 'A'..'Z') it.toString() else "#" } ?: "#"
 
         @Volatile private var icon: Drawable? = null
@@ -28,19 +29,47 @@ class AppIndex(private val ctx: Context) {
         fun cachedIcon(): Drawable? = icon?.let { it.constantState?.newDrawable() ?: it }
 
         fun loadIcon() {
-            if (icon == null) icon = try { activity.getBadgedIcon(0) } catch (_: Exception) { null }
+            if (icon == null) icon = try { fetchIcon() } catch (_: Exception) { null }
         }
     }
 
     private val la = ctx.getSystemService(LauncherApps::class.java)
     private val prefs = ctx.getSharedPreferences("launcher", Context.MODE_PRIVATE)
+    private val catalogPrefs by lazy { ctx.getSharedPreferences("app_catalog", Context.MODE_PRIVATE) }
+    private val locale by lazy { ctx.resources.configuration.locales.toLanguageTags() }
     var apps: List<App> = emptyList()
     var usage: Map<String, Long> = emptyMap()   // package → recent foreground ms
 
     fun loadApps(): List<App> =
         la.getActivityList(null, Process.myUserHandle())
-            .map { App(it.label.toString().trim(), it) }
+            .map { activity -> App(activity.label.toString().trim(), activity.componentName) { activity.getBadgedIcon(0) } }
             .sortedBy { it.label.lowercase() }
+
+    fun restoreApps(): List<App>? {
+        if (catalogPrefs.getString("locale", null) != locale) return null
+        val saved = catalogPrefs.getString("apps", null) ?: return null
+        return try {
+            val entries = JSONArray(saved)
+            (0 until entries.length()).mapNotNull { i ->
+                val entry = entries.getJSONArray(i)
+                val component = ComponentName.unflattenFromString(entry.getString(0)) ?: return@mapNotNull null
+                App(entry.getString(1), component) {
+                    la.resolveActivity(Intent().setComponent(component), Process.myUserHandle())?.getBadgedIcon(0)
+                }
+            }
+        } catch (_: JSONException) {
+            null
+        }
+    }
+
+    fun saveApps(apps: List<App>) {
+        val saved = JSONArray()
+        for (app in apps) saved.put(JSONArray(listOf(app.key, app.label)))
+        val encoded = saved.toString()
+        if (catalogPrefs.getString("apps", null) != encoded || catalogPrefs.getString("locale", null) != locale) {
+            catalogPrefs.edit().putString("apps", encoded).putString("locale", locale).apply()
+        }
+    }
 
     fun letters(): List<String> = apps.map { it.letter }.distinct().sortedWith(compareBy({ it == "#" }, { it }))
 

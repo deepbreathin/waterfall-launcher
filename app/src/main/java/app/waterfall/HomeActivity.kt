@@ -3,7 +3,9 @@ package app.waterfall
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.appwidget.AppWidgetHost
+import android.appwidget.AppWidgetHostView
 import android.appwidget.AppWidgetManager
+import android.appwidget.AppWidgetProviderInfo
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -32,6 +34,7 @@ import android.widget.PopupMenu
 import android.widget.ScrollView
 import android.widget.TextClock
 import android.widget.TextView
+import java.util.Collections
 import java.util.WeakHashMap
 import java.util.concurrent.Executors
 
@@ -58,6 +61,7 @@ class HomeActivity : Activity() {
         private const val PICK = 1; private const val CONFIGURE = 2; private const val PICK_SIDE = 3; private const val CONFIGURE_SIDE = 4
         private const val SECTION_ROWS = 12
         private const val USAGE_REFRESH_MS = 30 * 60_000L
+        private val widgetWorker = Executors.newSingleThreadExecutor()
     }
 
     private lateinit var index: AppIndex
@@ -83,6 +87,7 @@ class HomeActivity : Activity() {
     private var pendingWidget = -1
     private val catalogWorker = Executors.newSingleThreadExecutor()
     private val iconWorker = Executors.newSingleThreadExecutor()
+    private var pendingApps: List<AppIndex.App>? = null
     private var usageRequestedAt: Long? = null
     private var widgetsStarted = false
     private var widgetsBuilt = false
@@ -93,8 +98,10 @@ class HomeActivity : Activity() {
     private var favouritesShown: List<String>? = null
     private val appearancePrefs by lazy { Appearance.preferences(this) }
     private val textSizes = WeakHashMap<TextView, Float>()
+    private val appIcons = Collections.newSetFromMap(WeakHashMap<ImageView, Boolean>())
     private var textScale = 1f
     private val monochrome = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(0f) })
+    private var appIconFilter: ColorMatrixColorFilter? = null
     private val appearanceChanged = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         when (key) {
             Appearance.TEXT_SIZE -> {
@@ -102,12 +109,9 @@ class HomeActivity : Activity() {
                 strip.textScale = textScale
                 textSizes.forEach { (view, size) -> view.textSize = size * textScale }
             }
-            Appearance.MONOCHROME_HOME_ICONS -> {
-                val filter = homeIconFilter()
-                for (i in 0 until favourites.childCount) {
-                    val row = favourites.getChildAt(i) as? LinearLayout ?: continue
-                    (row.getChildAt(0) as ImageView).colorFilter = filter
-                }
+            Appearance.MONOCHROME_APP_ICONS -> {
+                appIconFilter = readIconFilter()
+                appIcons.forEach { it.colorFilter = appIconFilter }
             }
         }
     }
@@ -122,8 +126,15 @@ class HomeActivity : Activity() {
         window.navigationBarColor = Color.TRANSPARENT
         window.setFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
         index = AppIndex(this)
-        host = AppWidgetHost(this, HOST_ID)
+        catalogWorker.execute {
+            index.restoreApps()?.let { apps -> runOnUiThread { publishApps(apps) } }
+        }
+        host = object : AppWidgetHost(this, HOST_ID) {
+            override fun onCreateView(context: Context, id: Int, info: AppWidgetProviderInfo): AppWidgetHostView =
+                super.onCreateView(context, id, info).apply { setExecutor(widgetWorker) }
+        }
         textScale = readTextScale()
+        appIconFilter = readIconFilter()
         build()
         appearancePrefs.registerOnSharedPreferenceChangeListener(appearanceChanged)
         registerReceiver(packages, IntentFilter().apply {
@@ -145,7 +156,7 @@ class HomeActivity : Activity() {
     override fun onStart() {
         super.onStart()
         widgetsStarted = true
-        // Starting the host can apply RemoteViews synchronously. Let home draw first.
+        // Let home draw before querying the widget service.
         Choreographer.getInstance().postFrameCallback { root.post {
             if (widgetsStarted) startWidgets()
         } }
@@ -188,13 +199,22 @@ class HomeActivity : Activity() {
 
     private fun reload() = catalogWorker.execute {
         val apps = index.loadApps()
-        runOnUiThread {
-            if (isDestroyed) return@runOnUiThread
-            index.apps = apps
-            strip.letters = listOf("☆") + index.letters() + "○"
-            favouritesShown = null
-            refreshHome()
+        runOnUiThread { publishApps(apps) }
+        index.saveApps(apps)
+    }
+
+    private fun publishApps(apps: List<AppIndex.App>) {
+        if (isDestroyed) return
+        // Keep the letter positions and rows stable while the picker or drawer is in use.
+        if (index.apps.isNotEmpty() && (section.visibility == View.VISIBLE || allList.visibility != View.GONE)) {
+            pendingApps = apps
+            return
         }
+        pendingApps = null
+        index.apps = apps
+        strip.letters = listOf("☆") + index.letters() + "○"
+        favouritesShown = null
+        refreshHome()
     }
 
     private fun refreshUsage() {
@@ -216,8 +236,8 @@ class HomeActivity : Activity() {
 
     private fun readTextScale() = appearancePrefs.getInt(Appearance.TEXT_SIZE, Appearance.DEFAULT_TEXT_SIZE) / 100f
 
-    private fun homeIconFilter() = monochrome.takeIf {
-        appearancePrefs.getBoolean(Appearance.MONOCHROME_HOME_ICONS, false)
+    private fun readIconFilter() = monochrome.takeIf {
+        appearancePrefs.getBoolean(Appearance.MONOCHROME_APP_ICONS, false)
     }
 
     private fun TextView.launcherTextSize(size: Float) {
@@ -299,7 +319,10 @@ class HomeActivity : Activity() {
     private fun row(label: Boolean): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
         setPadding(dp(6), dp(6), 0, dp(6))
-        addView(ImageView(context), LinearLayout.LayoutParams(dp(42), dp(42)))
+        addView(ImageView(context).apply {
+            colorFilter = appIconFilter
+            appIcons.add(this)
+        }, LinearLayout.LayoutParams(dp(42), dp(42)))
         if (label) addView(label(19f, 500).apply { setPadding(dp(20), 0, 0, 0); isSingleLine = false; maxLines = 2 },
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         setOnClickListener {
@@ -331,11 +354,7 @@ class HomeActivity : Activity() {
         val favs = index.favourites()
         if (favs.map { it.key } != favouritesShown) {
             favourites.removeAllViews()
-            val filter = homeIconFilter()
-            for (a in favs) favourites.addView(row(label = false).apply {
-                (getChildAt(0) as ImageView).colorFilter = filter
-                bind(this, a)
-            })
+            for (a in favs) favourites.addView(row(label = false).also { bind(it, a) })
             if (favs.isEmpty() && !index.setUp()) favourites.addView(label(15f, 500, DIM).apply {
                 text = "Touch the right edge for your apps. Long-press one to add it here."; isSingleLine = false
             })
@@ -539,6 +558,7 @@ class HomeActivity : Activity() {
                 .hideSoftInputFromWindow(search.windowToken, 0)
             search.clearFocus()
         }
+        pendingApps?.let(::publishApps)
     }
 
     // ---------------------------------------------------------------- swipes: side page, notifications
