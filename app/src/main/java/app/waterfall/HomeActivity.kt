@@ -174,16 +174,20 @@ class HomeActivity : Activity() {
     override fun onResume() {
         super.onResume()
         sendBroadcast(Intent(HOME_VISIBLE).putExtra("visible", true))
-        if (section.visibility == View.VISIBLE || allList.visibility != View.GONE) closeAll()
+        if (!strip.fingerDown && (section.visibility == View.VISIBLE || allList.visibility != View.GONE)) closeAll()
         refreshUsage()
     }
 
-    override fun onPause() { super.onPause(); sendBroadcast(Intent(HOME_VISIBLE).putExtra("visible", false)) }
+    override fun onPause() {
+        super.onPause()
+        if (strip.fingerDown) closeAll()
+        sendBroadcast(Intent(HOME_VISIBLE).putExtra("visible", false))
+    }
 
     /** Home pressed again while already home: back to the plain home page. */
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
-        closeAll()
+        if (!strip.fingerDown) closeAll()
         if (side.visibility == View.VISIBLE) {
             side.animate().cancel()
             side.visibility = View.INVISIBLE
@@ -213,6 +217,7 @@ class HomeActivity : Activity() {
         pendingApps = null
         index.apps = apps
         strip.letters = listOf("☆") + index.letters() + "○"
+        if (strip.fingerDown && strip.bubble == null) pickLetter(stripY)
         favouritesShown = null
         refreshHome()
     }
@@ -383,6 +388,7 @@ class HomeActivity : Activity() {
     private var highlighted: View? = null
     // where the finger went down: letters are picked right of it, moving left of it goes onto the list
     private var stripX0 = 0f; private var stripY0 = 0f; private var stripT0 = 0L; private var stripWide = false
+    private var stripY = 0f
 
     /** On the bare home screen the whole right half picks letters; widgets there still take their own touches. */
     private fun wideCatch(e: MotionEvent): Boolean {
@@ -399,15 +405,17 @@ class HomeActivity : Activity() {
                 val edge = e.x >= strip.width - dp(if (allList.visibility == View.VISIBLE) 76 else 72)   // a generous edge: no need to aim
                 stripWide = !edge && wideCatch(e)
                 if (!edge && !stripWide) return@setOnTouchListener false
-                stripX0 = e.x; stripY0 = e.y; stripT0 = SystemClock.uptimeMillis()
+                stripX0 = e.x; stripY0 = e.y; stripT0 = e.eventTime
+                // The press belongs to the strip even if its app list is still loading.
+                strip.fingerDown = true
             }
+            if (!strip.fingerDown) return@setOnTouchListener true
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
+                    stripY = e.y
                     val onStrip = e.x > Math.min(strip.width - dp(90).toFloat(), stripX0 - dp(40))
                     if (onStrip || highlighted == null && section.visibility != View.VISIBLE) {
-                        val l = strip.letterAt(e.y) ?: return@setOnTouchListener true
-                        strip.alpha = 1f; strip.fingerDown = true; strip.follow(e.y)
-                        if (strip.bubble != l) { strip.bubble = l; showSection(l); strip.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK) }
+                        pickLetter(e.y)
                         highlight(null)
                     } else highlight(rowAt(e.rawY))   // finger moved left onto the list
                 }
@@ -419,7 +427,7 @@ class HomeActivity : Activity() {
                     val dx = e.x - stripX0; val dy = e.y - stripY0
                     when {
                         // a quick sideways flick from the wide area is still the swipe to the side page
-                        stripWide && dx < -dp(80) && Math.abs(dx) > Math.abs(dy) * 1.5f && SystemClock.uptimeMillis() - stripT0 < 300 ->
+                        stripWide && dx < -dp(80) && Math.abs(dx) > Math.abs(dy) * 1.5f && e.eventTime - stripT0 < 300 ->
                             { strip.release(); closeAll(); showSide(true) }
                         app != null -> { strip.release(); closeAll(); index.launch(app) }
                         letter == "○" -> { strip.release(); openAll(null) }
@@ -430,9 +438,20 @@ class HomeActivity : Activity() {
                         else -> { strip.release(); closeAll() }
                     }
                 }
-                MotionEvent.ACTION_CANCEL -> { strip.release(); highlight(null); closeAll() }
+                MotionEvent.ACTION_CANCEL -> closeAll()
             }
             true
+        }
+    }
+
+    private fun pickLetter(y: Float) {
+        val letter = strip.letterAt(y) ?: return
+        strip.alpha = 1f
+        strip.follow(y)
+        if (strip.bubble != letter) {
+            strip.bubble = letter
+            showSection(letter)
+            strip.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
         }
     }
 
@@ -548,6 +567,8 @@ class HomeActivity : Activity() {
 
     private fun closeAll() {
         if (!::section.isInitialized) return
+        strip.fingerDown = false
+        highlight(null)
         if (allWrap.paddingTop != dp(56)) allWrap.setPadding(dp(40), dp(56), dp(24), tail())
         if (strip.bubble != null) strip.release()
         section.visibility = View.GONE; allList.visibility = View.GONE
