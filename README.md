@@ -7,7 +7,7 @@ screen itself stays nearly empty.
 - **Right edge:** touch it and a letter strip appears and bends towards your finger. The apps for
   that letter show on the left, most-used first. Slide onto one and let go to open it. Let go on
   the strip instead and the full list stays where it is and scrolls freely, with search at the top.
-- **Swipe left:** a side page that holds one widget of your choice (long-press it to choose).
+- **Swipe right (left half):** opens an app you choose in Waterfall settings. (The old swipe-left widget page is hidden for now.)
 - **Swipe down:** notifications.
 - **Long-press an app** to add it to home or remove it. **Long-press empty space** for widgets and
   settings.

@@ -44,7 +44,7 @@ import java.util.concurrent.Executors
  * - The right edge: touch it and a letter strip appears and bends towards the finger; the left side
  *   shows that letter's apps, most-used first. Slide onto one and let go to open it. Let go on the
  *   strip and the full list takes over exactly where things are, then scrolls freely (search on top).
- * - Swipe left: a side page that holds one widget of your choice. Swipe down: notifications.
+ * - Swipe down: notifications. (The swipe-left widget page is hidden for now.)
  * - Drag right from the left half: opens the app chosen in settings (if any).
  * - Long-press an app to add or remove it from home; long-press empty space for widgets and settings.
  * Other apps can react to the home screen showing or hiding: it broadcasts [HOME_VISIBLE] with
@@ -407,12 +407,17 @@ class HomeActivity : Activity() {
                 stripWide = !edge && wideCatch(e)
                 if (!edge && !stripWide) return@setOnTouchListener false
                 stripX0 = e.x; stripY0 = e.y; stripT0 = e.eventTime
+                // Held still on the wide area: that's a long-press on home, so the home menu, not letters.
+                strip.removeCallbacks(stripLongPress)
+                if (stripWide) strip.postDelayed(stripLongPress, android.view.ViewConfiguration.getLongPressTimeout().toLong())
                 // The press belongs to the strip even if its app list is still loading.
                 strip.fingerDown = true
             }
             if (!strip.fingerDown) return@setOnTouchListener true
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
+                    val slop = android.view.ViewConfiguration.get(this).scaledTouchSlop
+                    if (Math.abs(e.x - stripX0) > slop || Math.abs(e.y - stripY0) > slop) strip.removeCallbacks(stripLongPress)
                     stripY = e.y
                     val onStrip = e.x > Math.min(strip.width - dp(90).toFloat(), stripX0 - dp(40))
                     if (onStrip || highlighted == null && section.visibility != View.VISIBLE) {
@@ -421,15 +426,16 @@ class HomeActivity : Activity() {
                     } else highlight(rowAt(e.rawY))   // finger moved left onto the list
                 }
                 MotionEvent.ACTION_UP -> {
+                    strip.removeCallbacks(stripLongPress)
                     strip.fingerDown = false
                     val app = highlighted?.tag as? AppIndex.App
                     val letter = strip.bubble
                     highlight(null)
                     val dx = e.x - stripX0; val dy = e.y - stripY0
                     when {
-                        // a quick sideways flick from the wide area is still the swipe to the side page
+                        // a quick sideways flick from the wide area does nothing (the swipe-left page is hidden for now)
                         stripWide && dx < -dp(80) && Math.abs(dx) > Math.abs(dy) * 1.5f && e.eventTime - stripT0 < 300 ->
-                            { strip.release(); closeAll(); showSide(true) }
+                            { strip.release(); closeAll() }
                         app != null -> { strip.release(); closeAll(); index.launch(app) }
                         letter == "○" -> { strip.release(); openAll(null) }
                         // Let go on a letter: the full list takes over, lined up so that letter's apps stay
@@ -439,10 +445,18 @@ class HomeActivity : Activity() {
                         else -> { strip.release(); closeAll() }
                     }
                 }
-                MotionEvent.ACTION_CANCEL -> closeAll()
+                MotionEvent.ACTION_CANCEL -> { strip.removeCallbacks(stripLongPress); closeAll() }
             }
             true
         }
+    }
+
+    private val stripLongPress = Runnable {
+        if (!strip.fingerDown || !stripWide) return@Runnable
+        strip.fingerDown = false          // the rest of this touch is ignored by the strip
+        strip.release(); closeAll()
+        strip.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        homeMenu(homeContent)
     }
 
     private fun pickLetter(y: Float) {
@@ -595,7 +609,6 @@ class HomeActivity : Activity() {
                     val dx = e.rawX - x0; val dy = e.rawY - y0
                     val sideways = Math.abs(dx) > Math.abs(dy) * 1.5f
                     when {
-                        dx < -dp(80) && sideways && !sideShown -> showSide(true)    // swipe left: the side page in from the right
                         dx > dp(80) && sideways && sideShown -> showSide(false)     // swipe right: back home
                         dy > dp(90) && !sideways && !sideShown -> notifications()
                     }
@@ -721,9 +734,9 @@ class HomeActivity : Activity() {
         if (!widgetsBuilt) {
             widgetsBuilt = true
             fillWidgets()
-            fillSide()
+            // The swipe-left side page is hidden for now (its widget isn't loaded); its code stays for later.
         }
-        if (!widgetsListening && (index.widgetIds().isNotEmpty() || index.sideWidget() > 0)) {
+        if (!widgetsListening && index.widgetIds().isNotEmpty()) {
             host.startListening()
             widgetsListening = true
         }
