@@ -11,8 +11,8 @@ android {
         applicationId = "app.waterfall"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.6"
+        versionCode = 8
+        versionName = "1.7"
     }
 
     // One committed sideload key, so anyone's build can update anyone else's install in place.

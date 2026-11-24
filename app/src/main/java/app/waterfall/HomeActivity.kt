@@ -45,6 +45,7 @@ import java.util.concurrent.Executors
  *   shows that letter's apps, most-used first. Slide onto one and let go to open it. Let go on the
  *   strip and the full list takes over exactly where things are, then scrolls freely (search on top).
  * - Swipe left: a side page that holds one widget of your choice. Swipe down: notifications.
+ * - Drag right from the left half: opens the app chosen in settings (if any).
  * - Long-press an app to add or remove it from home; long-press empty space for widgets and settings.
  * Other apps can react to the home screen showing or hiding: it broadcasts [HOME_VISIBLE] with
  * extra "visible" (true/false). App rows are reused across home returns.
@@ -606,6 +607,50 @@ class HomeActivity : Activity() {
         homeContent.isClickable = true
         homeContent.setOnLongClickListener { homeMenu(it); true }
         side.setOnTouchListener(swipe)
+    }
+
+    // Drag right from anywhere on the left half of bare home (widgets included) opens the chosen app.
+    // Watched at the window. Once the finger is clearly moving right the launcher takes the touch
+    // (views underneath get a cancel), so no long-press menu or widget can pick it up mid-drag.
+    private var rightX0 = -1f; private var rightY0 = 0f; private var rightT0 = 0L; private var rightOwned = false
+
+    override fun dispatchTouchEvent(e: MotionEvent): Boolean {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                rightOwned = false
+                val home = !sideShown && ::section.isInitialized && ::allList.isInitialized &&
+                    section.visibility != View.VISIBLE && allList.visibility != View.VISIBLE
+                val chosen = Appearance.preferences(this).contains(Appearance.SWIPE_RIGHT_APP)
+                rightX0 = if (home && chosen && ::root.isInitialized && e.rawX < root.width / 2f) e.rawX else -1f
+                rightY0 = e.rawY; rightT0 = e.eventTime
+            }
+            MotionEvent.ACTION_MOVE -> if (rightX0 >= 0f && !rightOwned) {
+                val dx = e.rawX - rightX0; val dy = e.rawY - rightY0
+                if (dx > dp(24) && dx > Math.abs(dy) * 1.5f) {
+                    rightOwned = true
+                    super.dispatchTouchEvent(MotionEvent.obtain(e).apply { action = MotionEvent.ACTION_CANCEL })
+                }
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> if (!rightOwned) rightX0 = -1f
+            MotionEvent.ACTION_CANCEL -> { rightX0 = -1f; if (rightOwned) { rightOwned = false; return true } }
+            MotionEvent.ACTION_UP -> if (rightOwned) {
+                val dx = e.rawX - rightX0; val dy = e.rawY - rightY0
+                rightOwned = false; rightX0 = -1f
+                if (dx > dp(80) && Math.abs(dx) > Math.abs(dy) * 1.5f) openSwipeRightApp()
+                return true
+            }
+        }
+        return if (rightOwned) true else super.dispatchTouchEvent(e)
+    }
+
+    private fun openSwipeRightApp(): Boolean {
+        val key = Appearance.preferences(this).getString(Appearance.SWIPE_RIGHT_APP, null) ?: return false
+        val component = android.content.ComponentName.unflattenFromString(key) ?: return false
+        return try {
+            getSystemService(android.content.pm.LauncherApps::class.java)
+                .startMainActivity(component, android.os.Process.myUserHandle(), null, null)
+            true
+        } catch (_: Exception) { false }
     }
 
     private fun showSide(show: Boolean) {

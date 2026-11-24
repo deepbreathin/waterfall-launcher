@@ -1,6 +1,8 @@
 package app.waterfall
 
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.ComponentName
 import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
@@ -56,6 +58,32 @@ class SettingsActivity : Activity() {
             text = "Use grayscale icons on home, in the alphabet picker, and in the app list."
             textSize = 14f
         })
+
+        content.addView(heading("Swipe right", 20f).apply { setPadding(0, dp(24), 0, dp(4)) })
+        content.addView(TextView(this).apply {
+            text = "Drag right from anywhere on the left half of home to open an app."
+            textSize = 14f
+        })
+        content.addView(Button(this).apply {
+            isAllCaps = false
+            fun label() {
+                val key = prefs.getString(Appearance.SWIPE_RIGHT_APP, null)
+                val app = key?.let { k -> AppIndex(this@SettingsActivity).loadApps().firstOrNull { it.key == k } }
+                text = "Opens: " + (app?.label ?: "nothing")
+            }
+            label()
+            setOnClickListener {
+                val apps = AppIndex(this@SettingsActivity).loadApps()
+                val names = arrayOf("Nothing") + apps.map { it.label }
+                AlertDialog.Builder(this@SettingsActivity).setTitle("Swipe right opens")
+                    .setItems(names) { _, i ->
+                        prefs.edit().apply {
+                            if (i == 0) remove(Appearance.SWIPE_RIGHT_APP) else putString(Appearance.SWIPE_RIGHT_APP, apps[i - 1].key)
+                        }.apply()
+                        label()
+                    }.show()
+            }
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
 
         content.addView(Button(this).apply {
             text = "Default home app"
